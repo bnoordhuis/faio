@@ -104,14 +104,6 @@ static void io_add(struct io *w,
   E(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev));
 }
 
-static void io_mod(struct io *w, unsigned int events)
-{
-  struct epoll_event ev;
-  ev.data.ptr = w;
-  ev.events = events;
-  E(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, w->fd, &ev));
-}
-
 static void io_poll(void)
 {
   struct epoll_event events[256];
@@ -130,6 +122,31 @@ static void io_poll(void)
     struct io *w = ev->data.ptr;
     w->cb(w, ev->events);
   }
+}
+
+static int client_write(struct client *c)
+{
+  ssize_t n;
+
+  do
+    n = write(c->io.fd, c->wr.buf, c->wr.len);
+  while (n == 0 && errno == EINTR);
+
+  if (n == -1) {
+    assert(errno == EAGAIN);
+    return 0;
+  }
+
+  if (n == 0)
+    return -1; // connection closed by peer
+
+  c->wr.buf = (const char *) c->wr.buf + n;
+  c->wr.len -= n;
+
+  if (c->wr.len == 0)
+    return -1;
+
+  return 0;
 }
 
 static int client_read(struct client *c)
@@ -166,38 +183,12 @@ again:
       c->ps = ps_dead;
       c->wr.buf = canned_response;
       c->wr.len = sizeof(canned_response) - 1;
-      io_mod(&c->io, EPOLLOUT);
-      break;
+      return client_write(c);
     }
   }
 
   if (n == sizeof(buf))
     goto again;
-
-  return 0;
-}
-
-static int client_write(struct client *c)
-{
-  ssize_t n;
-
-  do
-    n = write(c->io.fd, c->wr.buf, c->wr.len);
-  while (n == 0 && errno == EINTR);
-
-  if (n == -1) {
-    assert(errno == EAGAIN);
-    return 0;
-  }
-
-  if (n == 0)
-    return -1; // connection closed by peer
-
-  c->wr.buf = (const char *) c->wr.buf + n;
-  c->wr.len -= n;
-
-  if (c->wr.len == 0)
-    return -1;
 
   return 0;
 }
@@ -233,7 +224,7 @@ static void accept_cb(struct io *w, unsigned int revents)
 
   while (-1 != (fd = accept4(w->fd, NULL, NULL, SOCK_NONBLOCK))) {
     c = calloc(1, sizeof(*c));
-    io_add(&c->io, client_cb, fd, EPOLLIN | EPOLLET);
+    io_add(&c->io, client_cb, fd, EPOLLIN | EPOLLOUT | EPOLLET);
   }
 
   assert(errno == EAGAIN);
