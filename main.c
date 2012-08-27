@@ -35,6 +35,29 @@ enum parse_state
   ps_new,
   ps_eol,
   ps_eol_2,
+  ps_connection_c,
+  ps_connection_co,
+  ps_connection_con,
+  ps_connection_conn,
+  ps_connection_conne,
+  ps_connection_connec,
+  ps_connection_connect,
+  ps_connection_connecti,
+  ps_connection_connectio,
+  ps_connection_connection,
+  ps_connection_connection_,
+  ps_connection_connection__,
+  ps_connection_connection__k,
+  ps_connection_connection__ke,
+  ps_connection_connection__kee,
+  ps_connection_connection__keep,
+  ps_connection_connection__keep_,
+  ps_connection_connection__keep_a,
+  ps_connection_connection__keep_al,
+  ps_connection_connection__keep_ali,
+  ps_connection_connection__keep_aliv,
+  ps_connection_connection__keep_alive,
+  ps_connection_connection__keep_alive_,
   ps_error
 };
 
@@ -49,13 +72,22 @@ struct client
   struct faio_handle fh;
   enum parse_state ps;
   struct write_req wr;
+  unsigned int keep_alive:1;
 };
 
-static const char canned_response[] =
+static const char keepalive_response[] =
   "HTTP/1.1 200 OK\r\n"
   "Content-Length: 4\r\n"
   "Content-Type: text/plain\r\n"
-  "Connection: Keep-Alive\r\n"
+  "Connection: keep-alive\r\n"
+  "\r\n"
+  "OK\r\n";
+
+static const char connection_close_response[] =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Length: 4\r\n"
+  "Content-Type: text/plain\r\n"
+  "Connection: close\r\n"
   "\r\n"
   "OK\r\n";
 
@@ -86,27 +118,66 @@ static int create_server(unsigned short port)
   return fd;
 }
 
-static int parse_req(enum parse_state ps, const char *buf, unsigned int len)
+static int client_parse(struct client *c, const char *buf, unsigned int len)
 {
-  const char *p;
-  const char *pe;
+  enum parse_state ps;
+  unsigned char ch;
+  unsigned int i;
 
-  for (p = buf, pe = buf + len; p < pe; p++) {
-    if (*p == '\r')
-      ; /* skip */
-    else if (*p != '\n')
+  ps = c->ps;
+
+  for (i = 0; i < len; i++) {
+    ch = buf[i];
+
+    if (ch == '\r')
+      continue;
+
+    if (ch >= 'A' && ch <= 'Z')
+      ch += 'a' - 'A';
+
+    if (ch == 'c' && ps == ps_eol) {
+      ps = ps_connection_co;
+      continue;
+    }
+
+    if (ps >= ps_connection_c &&
+        ps <= ps_connection_connection__keep_alive_ &&
+        ch == "connection: keep-alive\n"[ps - ps_connection_c])
+    {
+      if (ch != '\n')
+        ps += 1;
+      else {
+        ps = ps_eol;
+        c->keep_alive = 1;
+      }
+      continue;
+    }
+
+    if (ch != '\n')
       ps = ps_new;
     else if (ps != ps_eol)
       ps = ps_eol;
-    else if (p + 1 == pe)
+    else if (i + 1 == len)
       ps = ps_eol_2;
-    else {
-      ps = ps_error;
-      break;
-    }
+    else
+      return -1;
   }
 
-  return ps;
+  c->ps = ps;
+
+  return 0;
+}
+
+static void client_send_response(struct client *c)
+{
+  if (c->keep_alive) {
+    c->wr.buf = keepalive_response;
+    c->wr.len = sizeof(keepalive_response) - 1;
+  }
+  else {
+    c->wr.buf = connection_close_response;
+    c->wr.len = sizeof(connection_close_response) - 1;
+  }
 }
 
 static int client_read(struct faio_loop *loop, struct client *c)
@@ -129,14 +200,11 @@ static int client_read(struct faio_loop *loop, struct client *c)
     if (n == 0)
       return -1; /* Connection closed by peer. */
 
-    c->ps = parse_req(c->ps, buf, n);
-
-    if (c->ps == ps_error)
+    if (client_parse(c, buf, n))
       return -1;
 
     if (c->ps == ps_eol_2) {
-      c->wr.buf = canned_response;
-      c->wr.len = sizeof(canned_response) - 1;
+      client_send_response(c);
       return faio_mod(loop, &c->fh, FAIO_POLLOUT);
     }
   }
@@ -170,6 +238,10 @@ static int client_write(struct faio_loop *loop, struct client *c)
   }
   while (c->wr.len != 0);
 
+  if (c->keep_alive == 0)
+    return -1;
+
+  c->keep_alive = 0;
   return faio_mod(loop, &c->fh, FAIO_POLLIN);
 }
 
