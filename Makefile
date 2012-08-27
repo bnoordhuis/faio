@@ -1,4 +1,4 @@
-CFLAGS	= -Wall -Wextra
+CFLAGS	= -Wall -Wextra -g
 
 all:	main.o
 	$(CC) $^ -o epollet
