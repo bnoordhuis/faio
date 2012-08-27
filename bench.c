@@ -1,6 +1,7 @@
 #define _GNU_SOURCE /* accept4, etc. */
 
-#include "faio.h"
+#define EV_MULTIPLICITY 1
+#include "ev.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -69,7 +70,7 @@ struct write_req
 
 struct client
 {
-  struct faio_handle fh;
+  struct ev_io fh;
   enum parse_state ps;
   struct write_req wr;
   unsigned int keep_alive:1;
@@ -229,7 +230,7 @@ static void client_send_response(struct client *c)
   }
 }
 
-static int client_read(struct faio_loop *loop, struct client *c)
+static int client_read(struct ev_loop *loop, struct client *c)
 {
   char buf[1024];
   ssize_t n;
@@ -254,7 +255,10 @@ static int client_read(struct faio_loop *loop, struct client *c)
 
     if (c->ps == ps_eol_2) {
       client_send_response(c);
-      return faio_mod(loop, &c->fh, FAIO_POLLOUT);
+      ev_io_stop(loop, &c->fh);
+      ev_io_set(&c->fh, c->fh.fd, EV_WRITE);
+      ev_io_start(loop, &c->fh);
+      return 0;
     }
   }
   while (n == sizeof(buf));
@@ -262,7 +266,7 @@ static int client_read(struct faio_loop *loop, struct client *c)
   return 0;
 }
 
-static int client_write(struct faio_loop *loop, struct client *c)
+static int client_write(struct ev_loop *loop, struct client *c)
 {
   ssize_t n;
 
@@ -291,42 +295,45 @@ static int client_write(struct faio_loop *loop, struct client *c)
     return -1;
 
   c->keep_alive = 0;
-  return faio_mod(loop, &c->fh, FAIO_POLLIN);
+  ev_io_stop(loop, &c->fh);
+  ev_io_set(&c->fh, c->fh.fd, EV_READ);
+  ev_io_start(loop, &c->fh);
+  return 0;
 }
 
-static void client_cb(struct faio_loop *loop,
-                      struct faio_handle *fh,
+static void client_cb(struct ev_loop *loop,
+                      struct ev_io *fh,
                       unsigned int revents)
 {
   struct client *c = CONTAINER_OF(fh, struct client, fh);
 
-  if (revents & (FAIO_POLLERR | FAIO_POLLHUP))
+  if (revents & EV_ERROR)
     goto err;
 
-  if (revents & FAIO_POLLIN)
+  if (revents & EV_READ)
     if (client_read(loop, c))
       goto err;
 
-  if (revents & FAIO_POLLOUT)
+  if (revents & EV_WRITE)
     if (client_write(loop, c))
       goto err;
 
   return;
 
 err:
-  faio_del(loop, fh);
+  ev_io_stop(loop, &c->fh);
   close(c->fh.fd);
   free(c);
 }
 
-static void accept_cb(struct faio_loop *loop,
-                      struct faio_handle *fh,
+static void accept_cb(struct ev_loop *loop,
+                      struct ev_io *fh,
                       unsigned int revents)
 {
   struct client *c;
   int fd;
 
-  assert(revents == FAIO_POLLIN);
+  assert(revents == EV_READ);
 
   while (-1 != (fd = nb_accept(fh->fd, NULL, NULL))) {
     c = calloc(1, sizeof(*c));
@@ -334,8 +341,8 @@ static void accept_cb(struct faio_loop *loop,
     if (c == NULL)
       abort();
 
-    if (faio_add(loop, &c->fh, client_cb, fd, FAIO_POLLIN))
-      abort();
+    ev_io_init(&c->fh, client_cb, fd, EV_READ);
+    ev_io_start(loop, &c->fh);
   }
 
   assert(errno == EAGAIN);
@@ -343,8 +350,8 @@ static void accept_cb(struct faio_loop *loop,
 
 int main(void)
 {
-  struct faio_handle server_handle;
-  struct faio_loop main_loop;
+  struct ev_io server_handle;
+  struct ev_loop *main_loop;
   int server_fd;
 
   E(signal(SIGPIPE, SIG_IGN));
@@ -353,16 +360,13 @@ int main(void)
   if (server_fd == -1)
     abort();
 
-  if (faio_init(&main_loop))
-    abort();
-
-  if (faio_add(&main_loop, &server_handle, accept_cb, server_fd, FAIO_POLLIN))
-    abort();
+  main_loop = ev_default_loop(0);
+  ev_io_init(&server_handle, accept_cb, server_fd, EV_READ);
+  ev_io_start(main_loop, &server_handle);
 
   for (;;)
-    faio_poll(&main_loop, -1);
+    ev_run(main_loop, EVRUN_ONCE);
 
-  faio_fini(&main_loop);
   close(server_fd);
 
   return 0;

@@ -1,5 +1,5 @@
 CFLAGS	= -Wall -Wextra -g -O2
-LDFLAGS	=
+LDFLAGS	= -lev
 
 UNAME	:= $(shell uname)
 
