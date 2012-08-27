@@ -1,5 +1,7 @@
 #define _GNU_SOURCE /* accept4, etc. */
 
+#include "faio.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +10,6 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <signal.h>
 #include <unistd.h>
@@ -29,17 +30,12 @@
   }                                                                           \
   while (0)
 
-struct io
-{
-  void (*cb)(struct io *, unsigned int);
-  int fd;
-};
-
 enum parse_state
 {
   ps_new,
   ps_eol,
-  ps_dead
+  ps_eol_2,
+  ps_error
 };
 
 struct write_req
@@ -50,17 +46,16 @@ struct write_req
 
 struct client
 {
-  struct io io;
+  struct faio_handle fh;
   enum parse_state ps;
   struct write_req wr;
 };
 
-static int epoll_fd = -1;
-
 static const char canned_response[] =
-  "HTTP/1.0 200 OK\r\n"
+  "HTTP/1.1 200 OK\r\n"
   "Content-Length: 4\r\n"
   "Content-Type: text/plain\r\n"
+  "Connection: Keep-Alive\r\n"
   "\r\n"
   "OK\r\n";
 
@@ -91,140 +86,134 @@ static int create_server(unsigned short port)
   return fd;
 }
 
-static void io_add(struct io *w,
-                   void (*cb)(struct io *, unsigned int),
-                   int fd,
-                   unsigned int events)
+static int parse_req(enum parse_state ps, const char *buf, unsigned int len)
 {
-  struct epoll_event ev;
-  w->cb = cb;
-  w->fd = fd;
-  ev.data.ptr = w;
-  ev.events = events;
-  E(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev));
-}
+  const char *p;
+  const char *pe;
 
-static void io_poll(void)
-{
-  struct epoll_event events[256];
-  int i;
-  int n;
-
-  do
-    n = epoll_wait(epoll_fd, events, ARRAY_SIZE(events), -1);
-  while (n == -1 && errno == EINTR);
-
-  assert(n != 0);
-  assert(n != -1);
-
-  for (i = 0; i < n; i++) {
-    struct epoll_event *ev = events + i;
-    struct io *w = ev->data.ptr;
-    w->cb(w, ev->events);
-  }
-}
-
-static int client_write(struct client *c)
-{
-  ssize_t n;
-
-  do
-    n = write(c->io.fd, c->wr.buf, c->wr.len);
-  while (n == 0 && errno == EINTR);
-
-  if (n == -1) {
-    assert(errno == EAGAIN);
-    return 0;
-  }
-
-  if (n == 0)
-    return -1; // connection closed by peer
-
-  c->wr.buf = (const char *) c->wr.buf + n;
-  c->wr.len -= n;
-
-  if (c->wr.len == 0)
-    return -1;
-
-  return 0;
-}
-
-static int client_read(struct client *c)
-{
-  char buf[1024];
-  ssize_t n;
-  ssize_t i;
-
-again:
-  assert(c->ps != ps_dead);
-
-  do
-    n = read(c->io.fd, buf, sizeof(buf));
-  while (n == -1 && errno == EINTR);
-
-  if (n == -1) {
-    assert(errno == EAGAIN);
-    return 0;
-  }
-
-  if (n == 0)
-    return -1; // connection closed by peer
-
-  for (i = 0; i < n; i++) {
-    if (buf[i] == '\r')
-      continue;
-
-    if (buf[i] != '\n')
-      c->ps = ps_new;
-    else if (c->ps != ps_eol)
-      c->ps = ps_eol;
+  for (p = buf, pe = buf + len; p < pe; p++) {
+    if (*p == '\r')
+      ; /* skip */
+    else if (*p != '\n')
+      ps = ps_new;
+    else if (ps != ps_eol)
+      ps = ps_eol;
+    else if (p + 1 == pe)
+      ps = ps_eol_2;
     else {
-      assert(i + 1 == n);
-      c->ps = ps_dead;
-      c->wr.buf = canned_response;
-      c->wr.len = sizeof(canned_response) - 1;
-      return client_write(c);
+      ps = ps_error;
+      break;
     }
   }
 
-  if (n == sizeof(buf))
-    goto again;
+  return ps;
+}
+
+static int client_read(struct faio_loop *loop, struct client *c)
+{
+  char buf[1024];
+  ssize_t n;
+
+  do {
+    assert(c->ps != ps_error);
+
+    do
+      n = read(c->fh.fd, buf, sizeof(buf));
+    while (n == -1 && errno == EINTR);
+
+    if (n == -1) {
+      assert(errno == EAGAIN);
+      return 0;
+    }
+
+    if (n == 0)
+      return -1; /* Connection closed by peer. */
+
+    c->ps = parse_req(c->ps, buf, n);
+
+    if (c->ps == ps_error)
+      return -1;
+
+    if (c->ps == ps_eol_2) {
+      c->wr.buf = canned_response;
+      c->wr.len = sizeof(canned_response) - 1;
+      return faio_mod(loop, &c->fh, FAIO_POLLOUT);
+    }
+  }
+  while (n == sizeof(buf));
 
   return 0;
 }
 
-static void client_cb(struct io *w, unsigned int revents)
+static int client_write(struct faio_loop *loop, struct client *c)
 {
-  struct client *c = CONTAINER_OF(w, struct client, io);
+  ssize_t n;
 
-  if (revents & (EPOLLERR | EPOLLHUP))
+  do {
+    assert(c->wr.buf != NULL);
+    assert(c->wr.len != 0);
+
+    do
+      n = write(c->fh.fd, c->wr.buf, c->wr.len);
+    while (n == 0 && errno == EINTR);
+
+    if (n == -1) {
+      assert(errno == EAGAIN);
+      return 0;
+    }
+
+    if (n == 0)
+      return -1; /* Connection closed by peer. */
+
+    c->wr.buf = (const char *) c->wr.buf + n;
+    c->wr.len -= n;
+  }
+  while (c->wr.len != 0);
+
+  return faio_mod(loop, &c->fh, FAIO_POLLIN);
+}
+
+static void client_cb(struct faio_loop *loop,
+                      struct faio_handle *fh,
+                      unsigned int revents)
+{
+  struct client *c = CONTAINER_OF(fh, struct client, fh);
+
+  if (revents & (FAIO_POLLERR | FAIO_POLLHUP))
     goto err;
 
-  if (revents & EPOLLIN)
-    if (client_read(c))
+  if (revents & FAIO_POLLIN)
+    if (client_read(loop, c))
       goto err;
 
-  if (revents & EPOLLOUT)
-    if (client_write(c))
+  if (revents & FAIO_POLLOUT)
+    if (client_write(loop, c))
       goto err;
 
   return;
 
 err:
-  close(c->io.fd);
+  close(c->fh.fd);
   free(c);
 }
 
-static void accept_cb(struct io *w, unsigned int revents)
+static void accept_cb(struct faio_loop *loop,
+                      struct faio_handle *fh,
+                      unsigned int revents)
 {
   struct client *c;
   int fd;
 
-  assert(revents == EPOLLIN);
+  assert(revents == FAIO_POLLIN);
 
-  while (-1 != (fd = accept4(w->fd, NULL, NULL, SOCK_NONBLOCK))) {
+  while (-1 != (fd = accept4(fh->fd, NULL, NULL, SOCK_NONBLOCK))) {
     c = calloc(1, sizeof(*c));
-    io_add(&c->io, client_cb, fd, EPOLLIN | EPOLLOUT | EPOLLET);
+
+    if (c == NULL)
+      abort();
+
+    if (faio_add(loop, &c->fh, client_cb, fd, FAIO_POLLIN))
+      abort();
   }
 
   assert(errno == EAGAIN);
@@ -232,12 +221,27 @@ static void accept_cb(struct io *w, unsigned int revents)
 
 int main(void)
 {
-  struct io server_io;
+  struct faio_handle server_handle;
+  struct faio_loop main_loop;
+  int server_fd;
 
   E(signal(SIGPIPE, SIG_IGN));
-  E(epoll_fd = epoll_create1(0));
-  io_add(&server_io, accept_cb, create_server(1234), EPOLLIN);
-  for (;;) io_poll();
+
+  server_fd = create_server(1234);
+  if (server_fd == -1)
+    abort();
+
+  if (faio_init(&main_loop))
+    abort();
+
+  if (faio_add(&main_loop, &server_handle, accept_cb, server_fd, FAIO_POLLIN))
+    abort();
+
+  for (;;)
+    faio_poll(&main_loop, -1);
+
+  faio_fini(&main_loop);
+  close(server_fd);
 
   return 0;
 }
