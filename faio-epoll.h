@@ -130,11 +130,8 @@ static void faio_poll(struct faio_loop *loop, double timeout)
   else
     ms = timeout * 1000;
 
-  /* We make a syscall to avoid having to link to librt.
-   * Possibly a deoptimization due to skipping the VDSO.
-   */
   if (ms > 0)
-    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &before))
+    if (clock_gettime(CLOCK_MONOTONIC, &before))
       abort();
 
   for (;;) {
@@ -193,7 +190,7 @@ update_timeout:
     if (ms == -1)
       continue;
 
-    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &after))
+    if (clock_gettime(CLOCK_MONOTONIC, &after))
       abort();
 
     /* Guard against an unlikely overflow in calculating the elapsed time. */
