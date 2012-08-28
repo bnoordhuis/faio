@@ -18,6 +18,7 @@
 #define FAIO_EPOLL_H_
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include <sys/epoll.h>
@@ -31,15 +32,60 @@
 #define FAIO_POLLERR  EPOLLERR
 #define FAIO_POLLHUP  EPOLLHUP
 
+struct faio__queue
+{
+  struct faio__queue *prev;
+  struct faio__queue *next;
+};
+
+#define faio__queue_data(ptr, type, member)                                   \
+  ((type *) ((char *) (ptr) - (uintptr_t) &((type *) 0)->member))
+
+FAIO_ATTRIBUTE_UNUSED
+static void faio__queue_init(struct faio__queue *q)
+{
+  q->prev = q;
+  q->next = q;
+}
+
+FAIO_ATTRIBUTE_UNUSED
+static int faio__queue_empty(const struct faio__queue *q)
+{
+  return q == q->prev;
+}
+
+FAIO_ATTRIBUTE_UNUSED
+static struct faio__queue *faio__queue_head(const struct faio__queue *q)
+{
+  return q->next;
+}
+
+FAIO_ATTRIBUTE_UNUSED
+static void faio__queue_append(struct faio__queue *q, struct faio__queue *n)
+{
+  q->prev->next = n;
+  n->prev = q->prev;
+  n->next = q;
+  q->prev = n;
+}
+
+FAIO_ATTRIBUTE_UNUSED
+static void faio__queue_remove(struct faio__queue *n)
+{
+  n->next->prev = n->prev;
+  n->prev->next = n->next;
+  faio__queue_init(n);
+}
+
 struct faio_loop
 {
-  struct faio_handle *next_pending;
+  struct faio__queue pending_queue;
   int epoll_fd;
 };
 
 struct faio_handle
 {
-  struct faio_handle *next_pending;
+  struct faio__queue pending_queue;
   void (*cb)(struct faio_loop *, struct faio_handle *, unsigned int);
   unsigned int events;  /* What the user wants to get notified about. */
   unsigned int revents; /* What is actually active. */
@@ -75,7 +121,7 @@ static int faio_init(struct faio_loop *loop)
     return -1;
 
   loop->epoll_fd = epoll_fd;
-  loop->next_pending = NULL;
+  faio__queue_init(&loop->pending_queue);
 
   return 0;
 }
@@ -91,7 +137,7 @@ static void faio_poll(struct faio_loop *loop, double timeout)
 {
   struct epoll_event events[256]; /* 3 kB */
   struct faio_handle *handle;
-  struct faio_handle *next;
+  struct faio__queue *queue;
   struct timespec before;
   struct timespec after;
   unsigned long elapsed;
@@ -105,24 +151,18 @@ static void faio_poll(struct faio_loop *loop, double timeout)
   dispatched = 0;
   maxevents = sizeof(events) / sizeof(events[0]);
 
-  if (loop->next_pending != NULL) {
-    handle = loop->next_pending;
-    loop->next_pending = NULL;
+  while (!faio__queue_empty(&loop->pending_queue)) {
+    queue = faio__queue_head(&loop->pending_queue);
+    handle = faio__queue_data(queue, struct faio_handle, pending_queue);
+    faio__queue_remove(queue);
 
-    for (/* empty */; handle != NULL; handle = next) {
-      next = handle->next_pending;
-      handle->next_pending = NULL;
+    revents = handle->revents & handle->events;
+    if (revents == 0)
+      continue;
 
-      revents = handle->revents & handle->events;
-      if (revents == 0)
-        continue;
-
-      handle->cb(loop, handle, revents);
-      dispatched = 1;
-    }
-
-    if (dispatched)
-      timeout = 0;
+    handle->cb(loop, handle, revents);
+    dispatched = 1;
+    timeout = 0;
   }
 
   if (timeout < 0)
@@ -225,7 +265,7 @@ static int faio_add(struct faio_loop *loop,
   events &= EPOLLIN | EPOLLOUT;
   events |= EPOLLERR | EPOLLHUP;
 
-  handle->next_pending = NULL;
+  faio__queue_init(&handle->pending_queue);
   handle->cb = cb;
   handle->fd = fd;
   handle->events = events;
@@ -249,14 +289,8 @@ static int faio_mod(struct faio_loop *loop,
   if (0 == (events & handle->revents))
     return 0;
 
-  if (handle->next_pending != NULL)
-    return 0;
-
-  if (loop->next_pending == handle)
-    return 0;
-
-  handle->next_pending = loop->next_pending;
-  loop->next_pending = handle;
+  if (faio__queue_empty(&handle->pending_queue))
+    faio__queue_append(&loop->pending_queue, &handle->pending_queue);
 
   return 0;
 }
@@ -264,23 +298,10 @@ static int faio_mod(struct faio_loop *loop,
 FAIO_ATTRIBUTE_UNUSED
 static int faio_del(struct faio_loop *loop, struct faio_handle *handle)
 {
-  struct faio_handle *curr;
-
-  if (loop->next_pending == handle)
-    loop->next_pending = handle->next_pending;
-  else if (handle->next_pending != NULL) {
-    /* This kind of sucks. The handle to be deleted is pending so we need to
-     * scan the list in O(n) fashion in order to remove it. Fortunately, the
-     * list is usually short.
-     */
-    for (curr = loop->next_pending;
-        curr->next_pending != handle;
-        curr = curr->next_pending);
-    curr->next_pending = handle->next_pending;
-  }
-
-  handle->next_pending = NULL;
   handle->events = 0;
+
+  if (faio__queue_empty(&handle->pending_queue))
+    faio__queue_remove(&handle->pending_queue);
 
   return epoll_ctl(loop->epoll_fd,
                    EPOLL_CTL_DEL,
