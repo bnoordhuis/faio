@@ -98,13 +98,62 @@ static void sys_error(const char* what)
   exit(42);
 }
 
+#if defined(__linux__)
+
+static int nb_socket(int family, int type, int proto)
+{
+  return socket(family, type | SOCK_NONBLOCK, proto);
+}
+
+static int nb_accept(int fd, struct sockaddr *saddr, socklen_t *slen)
+{
+  return accept4(fd, saddr, slen, SOCK_NONBLOCK);
+}
+
+#else /* !defined(__linux__) */
+
+#include <sys/filio.h>
+#include <sys/ioctl.h>
+
+static void nbio(int fd)
+{
+  int on;
+
+  on = 1;
+  E(ioctl(fd, FIONBIO, &on));
+}
+
+static int nb_socket(int family, int type, int proto)
+{
+  int fd;
+
+  fd = socket(family, type, proto);
+  if (fd != -1)
+    nbio(fd);
+
+  return fd;
+}
+
+static int nb_accept(int sfd, struct sockaddr *saddr, socklen_t *slen)
+{
+  int fd;
+
+  fd = accept(sfd, saddr, slen);
+  if (fd != -1)
+    nbio(fd);
+
+  return fd;
+}
+
+#endif /* defined(__linux__) */
+
 static int create_server(unsigned short port)
 {
   struct sockaddr_in sin;
   int fd;
   int on;
 
-  E(fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
+  E(fd = nb_socket(AF_INET, SOCK_STREAM, 0));
   on = 1;
   E(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)));
 
@@ -278,7 +327,7 @@ static void accept_cb(struct faio_loop *loop,
 
   assert(revents == FAIO_POLLIN);
 
-  while (-1 != (fd = accept4(fh->fd, NULL, NULL, SOCK_NONBLOCK))) {
+  while (-1 != (fd = nb_accept(fh->fd, NULL, NULL))) {
     c = calloc(1, sizeof(*c));
 
     if (c == NULL)
