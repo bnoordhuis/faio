@@ -314,6 +314,7 @@ static void client_cb(struct faio_loop *loop,
   return;
 
 err:
+  faio_del(loop, fh);
   close(c->fh.fd);
   free(c);
 }
