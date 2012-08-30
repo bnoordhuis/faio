@@ -300,7 +300,7 @@ static int faio_del(struct faio_loop *loop, struct faio_handle *handle)
 {
   handle->events = 0;
 
-  if (faio__queue_empty(&handle->pending_queue))
+  if (!faio__queue_empty(&handle->pending_queue))
     faio__queue_remove(&handle->pending_queue);
 
   return epoll_ctl(loop->epoll_fd,
