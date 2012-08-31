@@ -13,6 +13,10 @@ INCLUDE += faio-port.h
 LDFLAGS += -lsocket -lnsl
 endif
 
+ifeq ($(UNAME),Darwin)
+INCLUDE += faio-kqueue.h
+endif
+
 all:	bench.o
 	$(CC) $^ -o bench $(LDFLAGS)
 
