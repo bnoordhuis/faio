@@ -14,8 +14,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE /* accept4, etc. */
-
 #include "faio.h"
 #include "bench.h"
 
@@ -93,75 +91,6 @@ static const char connection_close_response[] =
   "Connection: close\r\n"
   "\r\n"
   "OK\r\n";
-
-#if defined(__linux__)
-
-static int nb_socket(int family, int type, int proto)
-{
-  return socket(family, type | SOCK_NONBLOCK, proto);
-}
-
-static int nb_accept(int fd, struct sockaddr *saddr, socklen_t *slen)
-{
-  return accept4(fd, saddr, slen, SOCK_NONBLOCK);
-}
-
-#else /* !defined(__linux__) */
-
-#include <sys/filio.h>
-#include <sys/ioctl.h>
-
-static void nbio(int fd)
-{
-  int on;
-
-  on = 1;
-  E(ioctl(fd, FIONBIO, &on));
-}
-
-static int nb_socket(int family, int type, int proto)
-{
-  int fd;
-
-  fd = socket(family, type, proto);
-  if (fd != -1)
-    nbio(fd);
-
-  return fd;
-}
-
-static int nb_accept(int sfd, struct sockaddr *saddr, socklen_t *slen)
-{
-  int fd;
-
-  fd = accept(sfd, saddr, slen);
-  if (fd != -1)
-    nbio(fd);
-
-  return fd;
-}
-
-#endif /* defined(__linux__) */
-
-static int create_server(unsigned short port)
-{
-  struct sockaddr_in sin;
-  int fd;
-  int on;
-
-  E(fd = nb_socket(AF_INET, SOCK_STREAM, 0));
-  on = 1;
-  E(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)));
-
-  memset(&sin, 0, sizeof(sin));
-  sin.sin_family = AF_INET;
-  sin.sin_port = htons(port);
-  sin.sin_addr.s_addr = INADDR_ANY;
-  E(bind(fd, (const struct sockaddr *) &sin, sizeof(sin)));
-  E(listen(fd, 1024));
-
-  return fd;
-}
 
 static int client_parse(struct client *c, const char *buf, unsigned int len)
 {
@@ -345,7 +274,7 @@ int main(void)
 
   E(signal(SIGPIPE, SIG_IGN));
 
-  server_fd = create_server(1234);
+  server_fd = create_inet_server(SOCK_STREAM, 1234);
   if (server_fd == -1)
     abort();
 
