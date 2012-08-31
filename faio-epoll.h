@@ -34,8 +34,60 @@
 #define FAIO_POLLERR  EPOLLERR
 #define FAIO_POLLHUP  EPOLLHUP
 
+#define FAIO_VECTOR_DECL(type)                                                \
+  struct                                                                      \
+  {                                                                           \
+    type *elts;                                                               \
+    unsigned int nelts;                                                       \
+  }
+
+#define FAIO_VECTOR_INIT(vec)                                                 \
+  do {                                                                        \
+    (vec)->elts = NULL;                                                       \
+    (vec)->nelts = 0;                                                         \
+  }                                                                           \
+  while (0)
+
+#define FAIO_VECTOR_FINI(vec)                                                 \
+  do {                                                                        \
+    free((vec)->elts);                                                        \
+    (vec)->elts = NULL;                                                       \
+    (vec)->nelts = 0;                                                         \
+  }                                                                           \
+  while (0)
+
+#define FAIO_VECTOR_LEN(vec)                                                  \
+  ((vec)->nelts)
+
+#define FAIO_VECTOR_GET(vec, idx)                                             \
+  ((vec)->elts[(unsigned int) (idx)])
+
+#define FAIO_VECTOR_SET(vec, idx, val)                                        \
+  do {                                                                        \
+    if (FAIO_VECTOR_LEN(vec) < (unsigned int) (idx)) {                        \
+      unsigned int v = (unsigned int) (idx);                                  \
+      if (v < 256)                                                            \
+        v = 256;                                                              \
+      else {                                                                  \
+        /* Next power of two. */                                              \
+        v -= 1;                                                               \
+        v |= v >> 1;                                                          \
+        v |= v >> 2;                                                          \
+        v |= v >> 4;                                                          \
+        v |= v >> 8;                                                          \
+        v |= v >> 16;                                                         \
+        v += 1;                                                               \
+      }                                                                       \
+      (vec)->elts = realloc((vec)->elts, v * sizeof((vec)->elts[0]));         \
+      (vec)->nelts = v;                                                       \
+    }                                                                         \
+    (vec)->elts[(unsigned int) (idx)] = (val);                                \
+  }                                                                           \
+  while (0)
+
 struct faio_loop
 {
+  FAIO_VECTOR_DECL(struct faio_handle *) handles;
   struct faio__queue pending_queue;
   int epoll_fd;
 };
@@ -44,9 +96,9 @@ struct faio_handle
 {
   struct faio__queue pending_queue;
   void (*cb)(struct faio_loop *, struct faio_handle *, unsigned int);
-  unsigned int events;  /* What the user wants to get notified about. */
-  unsigned int revents; /* What is actually active. */
+  unsigned int events;
   int fd;
+  int op;
 };
 
 FAIO_ATTRIBUTE_UNUSED
@@ -78,6 +130,7 @@ static int faio_init(struct faio_loop *loop)
     return -1;
 
   loop->epoll_fd = epoll_fd;
+  FAIO_VECTOR_INIT(&loop->handles);
   faio__queue_init(&loop->pending_queue);
 
   return 0;
@@ -86,6 +139,7 @@ static int faio_init(struct faio_loop *loop)
 FAIO_ATTRIBUTE_UNUSED
 static void faio_fini(struct faio_loop *loop)
 {
+  FAIO_VECTOR_FINI(&loop->handles);
   close(loop->epoll_fd);
   loop->epoll_fd = -1;
 }
@@ -93,18 +147,22 @@ static void faio_fini(struct faio_loop *loop)
 FAIO_ATTRIBUTE_UNUSED
 static void faio_poll(struct faio_loop *loop, double timeout)
 {
-  struct epoll_event events[256]; /* 3 kB */
+  struct epoll_event events[1024]; /* 12 kB */
   struct faio_handle *handle;
   struct faio__queue *queue;
   struct timespec before;
   struct timespec after;
   unsigned long elapsed;
-  unsigned int dispatched;
   unsigned int maxevents;
-  unsigned int revents;
+  unsigned int dispatched;
+  int fd;
   int ms;
   int i;
   int n;
+
+  /* Silence compiler warning. */
+  before.tv_sec = 0;
+  before.tv_nsec = 0;
 
   dispatched = 0;
   maxevents = sizeof(events) / sizeof(events[0]);
@@ -114,13 +172,23 @@ static void faio_poll(struct faio_loop *loop, double timeout)
     handle = faio__queue_data(queue, struct faio_handle, pending_queue);
     faio__queue_remove(queue);
 
-    revents = handle->revents & handle->events;
-    if (revents == 0)
-      continue;
+    events[0].events = handle->events;
+    events[0].data.ptr = 0; /* Silence valgrind. */
+    events[0].data.fd = handle->fd;
 
-    handle->cb(loop, handle, revents);
-    dispatched = 1;
-    timeout = 0;
+    /* With EPOLL_CTL_ADD, it's possible for the operation to fail with EEXIST
+     * if a file descriptor:
+     *
+     *  a) has been unregistered with faio_del()
+     *  b) but not closed and not deleted with EPOLL_CTL_DEL
+     *  c) and re-registered again with faio_add()
+     */
+    if (epoll_ctl(loop->epoll_fd, handle->op, handle->fd, events)) {
+      if (handle->op == EPOLL_CTL_ADD && errno == EEXIST)
+        epoll_ctl(loop->epoll_fd, EPOLL_CTL_MOD, handle->fd, events);
+      else
+        abort();
+    }
   }
 
   if (timeout < 0)
@@ -153,15 +221,19 @@ static void faio_poll(struct faio_loop *loop, double timeout)
     }
 
     for (i = 0; i < n; i++) {
-      handle = (struct faio_handle *) events[i].data.ptr;
-      revents = events[i].events;
-      handle->revents = revents;
+      fd = events[i].data.fd;
+      handle = FAIO_VECTOR_GET(&loop->handles, fd);
 
-      revents &= handle->events;
-      if (revents == 0)
+      if (handle == NULL) {
+        /* Event for a fd we stopped watching. Kill it. */
+        epoll_ctl(loop->epoll_fd,
+                  EPOLL_CTL_DEL,
+                  fd,
+                  (struct epoll_event *) 1024); /* Work around kernel bug. */
         continue;
+      }
 
-      handle->cb(loop, handle, revents);
+      handle->cb(loop, handle, events[i].events);
       dispatched = 1;
     }
 
@@ -176,9 +248,9 @@ static void faio_poll(struct faio_loop *loop, double timeout)
     if (dispatched)
       return;
 
-    /* We didn't invoke any callbacks, just updated some watchers.
-     * From the perspective of the caller nothing happened so update
-     * the timeout and poll again.
+    /* We only got events for file descriptors we're no longer watching.
+     * No callbacks were invoked so from the perspective of the user nothing
+     * happened. Update the timeout and poll again.
      */
 
 update_timeout:
@@ -218,21 +290,17 @@ static int faio_add(struct faio_loop *loop,
                     int fd,
                     unsigned int events)
 {
-  struct epoll_event evt;
-
   events &= EPOLLIN | EPOLLOUT;
   events |= EPOLLERR | EPOLLHUP;
 
-  faio__queue_init(&handle->pending_queue);
+  FAIO_VECTOR_SET(&loop->handles, fd, handle);
+  faio__queue_append(&loop->pending_queue, &handle->pending_queue);
   handle->cb = cb;
   handle->fd = fd;
+  handle->op = EPOLL_CTL_ADD;
   handle->events = events;
-  handle->revents = 0;
 
-  evt.events = EPOLLIN | EPOLLOUT | EPOLLET;
-  evt.data.ptr = handle;
-
-  return epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, fd, &evt);
+  return 0;
 }
 
 FAIO_ATTRIBUTE_UNUSED
@@ -242,10 +310,9 @@ static int faio_mod(struct faio_loop *loop,
 {
   events &= EPOLLIN | EPOLLOUT;
   events |= EPOLLERR | EPOLLHUP;
-  handle->events = events;
 
-  if (0 == (events & handle->revents))
-    return 0;
+  handle->op = EPOLL_CTL_MOD;
+  handle->events = events;
 
   if (faio__queue_empty(&handle->pending_queue))
     faio__queue_append(&loop->pending_queue, &handle->pending_queue);
@@ -256,15 +323,12 @@ static int faio_mod(struct faio_loop *loop,
 FAIO_ATTRIBUTE_UNUSED
 static int faio_del(struct faio_loop *loop, struct faio_handle *handle)
 {
-  handle->events = 0;
+  FAIO_VECTOR_SET(&loop->handles, handle->fd, NULL);
 
   if (!faio__queue_empty(&handle->pending_queue))
     faio__queue_remove(&handle->pending_queue);
 
-  return epoll_ctl(loop->epoll_fd,
-                   EPOLL_CTL_DEL,
-                   handle->fd,
-                   (struct epoll_event *) 1024); /* Work around kernel bug. */
+  return 0;
 }
 
 #endif /* FAIO_EPOLL_H_ */
