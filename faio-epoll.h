@@ -17,6 +17,8 @@
 #ifndef FAIO_EPOLL_H_
 #define FAIO_EPOLL_H_
 
+#include "faio-util.h"
+
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -31,51 +33,6 @@
 #define FAIO_POLLOUT  EPOLLOUT
 #define FAIO_POLLERR  EPOLLERR
 #define FAIO_POLLHUP  EPOLLHUP
-
-struct faio__queue
-{
-  struct faio__queue *prev;
-  struct faio__queue *next;
-};
-
-#define faio__queue_data(ptr, type, member)                                   \
-  ((type *) ((char *) (ptr) - (uintptr_t) &((type *) 0)->member))
-
-FAIO_ATTRIBUTE_UNUSED
-static void faio__queue_init(struct faio__queue *q)
-{
-  q->prev = q;
-  q->next = q;
-}
-
-FAIO_ATTRIBUTE_UNUSED
-static int faio__queue_empty(const struct faio__queue *q)
-{
-  return q == q->prev;
-}
-
-FAIO_ATTRIBUTE_UNUSED
-static struct faio__queue *faio__queue_head(const struct faio__queue *q)
-{
-  return q->next;
-}
-
-FAIO_ATTRIBUTE_UNUSED
-static void faio__queue_append(struct faio__queue *q, struct faio__queue *n)
-{
-  q->prev->next = n;
-  n->prev = q->prev;
-  n->next = q;
-  q->prev = n;
-}
-
-FAIO_ATTRIBUTE_UNUSED
-static void faio__queue_remove(struct faio__queue *n)
-{
-  n->next->prev = n->prev;
-  n->prev->next = n->next;
-  faio__queue_init(n);
-}
 
 struct faio_loop
 {
