@@ -13,12 +13,12 @@ INCLUDE += faio-port.h
 LDFLAGS += -lsocket -lnsl
 endif
 
-all:	main.o
+all:	bench.o
 	$(CC) $^ -o bench $(LDFLAGS)
 
 clean:
-	rm -f main.o bench
+	rm -f bench.o bench
 
-main.o:	main.c faio.h $(INCLUDE)
+bench.o:	bench.c faio.h $(INCLUDE)
 
 .PHONY:	all clean
