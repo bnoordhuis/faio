@@ -87,6 +87,7 @@ FAIO_ATTRIBUTE_UNUSED
 static void faio_fini(struct faio_loop *loop)
 {
   close(loop->epoll_fd);
+  loop->epoll_fd = -1;
 }
 
 FAIO_ATTRIBUTE_UNUSED
