@@ -17,6 +17,7 @@
 #define _GNU_SOURCE /* accept4, etc. */
 
 #include "faio.h"
+#include "bench.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -31,20 +32,6 @@
 #include <unistd.h>
 
 #include <netinet/in.h>
-
-#define ARRAY_SIZE(a)                                                         \
-  (sizeof(a) / sizeof((a)[0]))
-
-#define CONTAINER_OF(ptr, type, member)                                       \
-  ((type *) ((char *) (ptr) - (unsigned long) &((type *) 0)->member))
-
-#define E(expr)                                                               \
-  do {                                                                        \
-    errno = 0;                                                                \
-    do { expr; } while (0);                                                   \
-    if (errno) sys_error(#expr);                                              \
-  }                                                                           \
-  while (0)
 
 enum parse_state
 {
@@ -106,13 +93,6 @@ static const char connection_close_response[] =
   "Connection: close\r\n"
   "\r\n"
   "OK\r\n";
-
-__attribute__((noreturn))
-static void sys_error(const char* what)
-{
-  fprintf(stderr, "%s: %s (errno=%d)\n", what, strerror(errno), errno);
-  exit(42);
-}
 
 #if defined(__linux__)
 
