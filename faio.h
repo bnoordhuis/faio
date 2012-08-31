@@ -54,6 +54,8 @@ static int faio_del(struct faio_loop *loop, struct faio_handle *handle);
 
 #if defined(__linux__)
 #include "faio-epoll.h"
+#elif defined(__sun)
+#include "faio-port.h"
 #else
 #error "Platform not supported."
 #endif
