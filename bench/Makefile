@@ -15,11 +15,15 @@ endif
 
 .PHONY:	all clean
 
-all:	http-simple
+all:	http-simple udp-simple
 
 http-simple.o:	http-simple.c ../include/faio.h ../include/$(INCLUDE)
 http-simple:	http-simple.o
 	$(CC) $^ -o $@ $(LDFLAGS)
 
+udp-simple.o:	udp-simple.c ../include/faio.h ../include/$(INCLUDE)
+udp-simple:	udp-simple.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+
 clean:
-	rm -f http-simple http-simple.o
+	rm -f http-simple http-simple.o udp-simple udp-simple.o
