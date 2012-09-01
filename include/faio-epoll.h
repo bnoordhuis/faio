@@ -34,6 +34,15 @@
 #define FAIO_POLLERR  EPOLLERR
 #define FAIO_POLLHUP  EPOLLHUP
 
+#define FAIO_EVENT_TYPE                                                       \
+  struct epoll_event
+
+#define FAIO_EVENT_ARRAY_GET_EVENTS(var)                                      \
+  ((var)->events)
+
+#define FAIO_EVENT_ARRAY_GET_DATA(var)                                        \
+  ((var)->data.ptr)
+
 struct faio_loop
 {
   struct faio__queue pending_queue;
@@ -91,15 +100,16 @@ static void faio_fini(struct faio_loop *loop)
 }
 
 FAIO_ATTRIBUTE_UNUSED
-static void faio_poll(struct faio_loop *loop, double timeout)
+static unsigned int faio_poll(struct faio_loop *loop,
+                              struct epoll_event *events,
+                              unsigned int maxevents,
+                              double timeout)
 {
-  struct epoll_event events[1024]; /* 12 kB */
   struct faio_handle *handle;
   struct faio__queue *queue;
   struct timespec before;
   struct timespec after;
   unsigned long elapsed;
-  unsigned int maxevents;
   int ms;
   int i;
   int n;
@@ -107,8 +117,6 @@ static void faio_poll(struct faio_loop *loop, double timeout)
   /* Silence compiler warning. */
   before.tv_sec = 0;
   before.tv_nsec = 0;
-
-  maxevents = sizeof(events) / sizeof(events[0]);
 
   while (!faio__queue_empty(&loop->pending_queue)) {
     struct epoll_event evt;
@@ -134,41 +142,14 @@ static void faio_poll(struct faio_loop *loop, double timeout)
   for (;;) {
     n = epoll_wait(loop->epoll_fd, events, maxevents, ms);
 
-    if (n == 0) {
-      /* A -1 timeout means "wait indefinitely" and modern kernels do
-       * but old (ancient) kernels wait for LONG_MAX milliseconds.
-       */
-      if (ms == -1)
-        continue;
-      else
-        return;
-    }
+    if (n != -1)
+      return n;
 
-    if (n == -1) {
-      if (errno == EINTR)
-        goto update_timeout;
-      else
-        abort();
-    }
+    if (errno != EINTR)
+      abort();
 
-    for (i = 0; i < n; i++) {
-      handle = (struct faio_handle *) events[i].data.ptr;
-      handle->cb(loop, handle, events[i].events);
-    }
-
-    /* We read as many events as we could but there might still be more.
-     * Poll again but don't block this time.
-     */
-    if (maxevents == (unsigned int) n) {
-      ms = 0;
-      continue;
-    }
-
-    return;
-
-update_timeout:
     if (ms == 0)
-      return;
+      return 0;
 
     if (ms == -1)
       continue;
@@ -178,7 +159,7 @@ update_timeout:
 
     /* Guard against an unlikely overflow in calculating the elapsed time. */
     if ((after.tv_sec - before.tv_sec) > (ms / 1000))
-      return;
+      return 0;
 
     elapsed  = 1000UL;
     elapsed -= before.tv_nsec / 1000000UL;
@@ -187,7 +168,7 @@ update_timeout:
     elapsed += 1000UL * (after.tv_sec - before.tv_sec);
 
     if (elapsed >= (unsigned long) ms)
-      return;
+      return 0;
 
     ms -= elapsed;
     before = after;

@@ -268,8 +268,13 @@ static void accept_cb(struct faio_loop *loop,
 
 int main(void)
 {
+  FAIO_EVENT_TYPE events[1024];
   struct faio_handle server_handle;
+  struct faio_handle *handle;
   struct faio_loop main_loop;
+  unsigned int nevents;
+  unsigned int revents;
+  unsigned int i;
   int server_fd;
 
   E(signal(SIGPIPE, SIG_IGN));
@@ -284,8 +289,15 @@ int main(void)
   if (faio_add(&main_loop, &server_handle, accept_cb, server_fd, FAIO_POLLIN))
     abort();
 
-  for (;;)
-    faio_poll(&main_loop, -1);
+  for (;;) {
+    nevents = faio_poll(&main_loop, events, ARRAY_SIZE(events), -1);
+
+    for (i = 0; i < nevents; i++) {
+      revents = FAIO_EVENT_ARRAY_GET_EVENTS(events + i);
+      handle = FAIO_EVENT_ARRAY_GET_DATA(events + i);
+      handle->cb(&main_loop, handle, revents);
+    }
+  }
 
   faio_fini(&main_loop);
   close(server_fd);

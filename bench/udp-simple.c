@@ -226,8 +226,10 @@ int main(int argc, char **argv)
 
   pummel();
 
+#if 0
   for (;;)
     faio_poll(&main_loop, 1000);
+#endif
 
   faio_fini(&main_loop);
   close(server_fd);

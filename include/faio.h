@@ -17,14 +17,7 @@
 #ifndef FAIO_H_
 #define FAIO_H_
 
-#if defined(__GNUC__)
-#define FAIO_ATTRIBUTE_UNUSED __attribute__((unused))
-#else
-#define FAIO_ATTRIBUTE_UNUSED
-#endif
-
-struct faio_loop;
-struct faio_handle;
+#include "faio-inl.h"
 
 FAIO_ATTRIBUTE_UNUSED
 static int faio_init(struct faio_loop *loop);
@@ -33,7 +26,10 @@ FAIO_ATTRIBUTE_UNUSED
 static void faio_fini(struct faio_loop *loop);
 
 FAIO_ATTRIBUTE_UNUSED
-static void faio_poll(struct faio_loop *loop, double timeout);
+static unsigned int faio_poll(struct faio_loop *loop,
+                              FAIO_EVENT_TYPE *events,
+                              unsigned int maxevents,
+                              double timeout);
 
 FAIO_ATTRIBUTE_UNUSED
 static int faio_add(struct faio_loop *loop,
@@ -51,14 +47,6 @@ static int faio_mod(struct faio_loop *loop,
 
 FAIO_ATTRIBUTE_UNUSED
 static int faio_del(struct faio_loop *loop, struct faio_handle *handle);
-
-#if defined(__linux__)
-#include "faio-epoll.h"
-#elif defined(__sun)
-#include "faio-port.h"
-#else
-#error "Platform not supported."
-#endif
 
 #undef FAIO_ATTRIBUTE_UNUSED
 
