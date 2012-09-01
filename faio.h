@@ -63,5 +63,6 @@ static int faio_del(struct faio_loop *loop, struct faio_handle *handle);
 #endif
 
 #undef FAIO_ATTRIBUTE_UNUSED
+#undef FAIO_TIMESPEC_SUB
 
 #endif /* FAIO_H_ */

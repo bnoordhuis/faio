@@ -32,20 +32,6 @@
 #define FAIO_POLLERR  POLLERR
 #define FAIO_POLLHUP  POLLHUP
 
-/* Makes c = a - b. Assumes tv_sec is signed in the case that a < b. */
-#define FAIO_TIMESPEC_SUB(a, b, c)                                            \
-  do {                                                                        \
-    long nsec = (long) (a)->tv_nsec - (long) (b)->tv_nsec;                    \
-    long sec = (long) (a)->tv_sec - (long) (b)->tv_sec;                       \
-    if (nsec < 0) {                                                           \
-      nsec += 1000000000UL;                                                   \
-      sec -= 1;                                                               \
-    }                                                                         \
-    (c)->tv_nsec = nsec;                                                      \
-    (c)->tv_sec = sec;                                                        \
-  }                                                                           \
-  while (0)
-
 struct faio_loop
 {
   struct faio__queue pending_queue;
@@ -264,7 +250,5 @@ static int faio_del(struct faio_loop *loop, struct faio_handle *handle)
 
   return port_dissociate(loop->port_fd, PORT_SOURCE_FD, handle->fd);
 }
-
-#undef FAIO_TIMESPEC_SUB
 
 #endif /* FAIO_PORT_H_ */

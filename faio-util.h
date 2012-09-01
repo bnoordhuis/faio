@@ -17,6 +17,20 @@
 #ifndef FAIO_UTIL_H_
 #define FAIO_UTIL_H_
 
+/* Makes c = a - b. Assumes tv_sec is signed in the case that a < b. */
+#define FAIO_TIMESPEC_SUB(a, b, c)                                            \
+  do {                                                                        \
+    long nsec = (long) (a)->tv_nsec - (long) (b)->tv_nsec;                    \
+    long sec = (long) (a)->tv_sec - (long) (b)->tv_sec;                       \
+    if (nsec < 0) {                                                           \
+      nsec += 1000000000UL;                                                   \
+      sec -= 1;                                                               \
+    }                                                                         \
+    (c)->tv_nsec = nsec;                                                      \
+    (c)->tv_sec = sec;                                                        \
+  }                                                                           \
+  while (0)
+
 struct faio__queue
 {
   struct faio__queue *prev;
