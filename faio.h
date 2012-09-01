@@ -56,7 +56,11 @@ static int faio_del(struct faio_loop *loop, struct faio_handle *handle);
 #include "faio-epoll.h"
 #elif defined(__sun)
 #include "faio-port.h"
-#elif defined(__APPLE__)
+#elif defined(__APPLE__)      || \
+      defined(__DragonFly__)  || \
+      defined(__FreeBSD__)    || \
+      defined(__NetBSD__)     || \
+      defined(__OpenBSD__)
 #include "faio-kqueue.h"
 #else
 #error "Platform not supported."

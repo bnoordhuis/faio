@@ -26,26 +26,26 @@
 #include <sys/types.h>
 #include <sys/event.h>
 #include <sys/time.h>
-#include <mach/mach_time.h>
 #include <unistd.h>
+#include <poll.h>
 
-#define FAIO_POLLIN   0x1
-#define FAIO_POLLOUT  0x2
-#define FAIO_POLLERR  0x4
-#define FAIO_POLLHUP  0x8
+#define FAIO_POLLIN   POLLIN
+#define FAIO_POLLOUT  POLLOUT
+#define FAIO_POLLERR  POLLERR
+#define FAIO_POLLHUP  POLLHUP
 
 struct faio_loop
 {
-  int kq;
   struct faio__queue pending_queue;
+  int kq;
 };
 
 struct faio_handle
 {
   struct faio__queue pending_queue;
   void (*cb)(struct faio_loop *, struct faio_handle *, unsigned int);
-  unsigned int events;  /* What the user wants to get notified about. */
-  unsigned int revents; /* What is actually active. */
+  unsigned int revents;
+  unsigned int events;
   int fd;
 };
 
@@ -59,9 +59,8 @@ static int faio_init(struct faio_loop *loop)
   if (kq == -1)
     return -1;
 
-  loop->kq = kq;
-
   faio__queue_init(&loop->pending_queue);
+  loop->kq = kq;
 
   return 0;
 }
@@ -76,55 +75,87 @@ static void faio_fini(struct faio_loop *loop)
 FAIO_ATTRIBUTE_UNUSED
 static void faio_poll(struct faio_loop *loop, double timeout)
 {
-  struct kevent events[96]; /* 3 kB */
+  struct kevent events[256]; /* 8 kB */
   struct faio_handle *handle;
   struct faio__queue *queue;
-  mach_timebase_info_t tb;
-  uint64_t before;
-  uint64_t after;
-  uint64_t diff;
+  struct timespec before;
+  struct timespec after;
+  struct timespec diff;
+  struct timespec *pts;
   struct timespec ts;
-  unsigned int dispatched;
   unsigned int maxevents;
   unsigned int revents;
+  int op;
   int i;
   int n;
 
-  dispatched = 0;
+  /* Silence compiler warning. */
+  before.tv_nsec = 0;
+  before.tv_sec = 0;
+
   maxevents = sizeof(events) / sizeof(events[0]);
+
+  n = 0;
 
   while (!faio__queue_empty(&loop->pending_queue)) {
     queue = faio__queue_head(&loop->pending_queue);
     handle = faio__queue_data(queue, struct faio_handle, pending_queue);
     faio__queue_remove(queue);
 
-    revents = handle->revents & handle->events;
-    if (revents == 0)
-      continue;
+    if ((handle->events & POLLIN) != (handle->revents & POLLIN)) {
+      if (handle->events & POLLIN)
+        op = EV_ADD | EV_ENABLE;
+      else
+        op = EV_DELETE | EV_DISABLE;
 
-    handle->cb(loop, handle, revents);
-    dispatched = 1;
-    timeout = 0;
+      EV_SET(events + n, handle->fd, EVFILT_READ, op, 0, 0, handle);
+
+      if (maxevents == (unsigned int) ++n) {
+        kevent(loop->kq, events, n, NULL, 0, NULL);
+        n = 0;
+      }
+    }
+
+    if ((handle->events & POLLOUT) != (handle->revents & POLLOUT)) {
+      if (handle->events & POLLOUT)
+        op = EV_ADD | EV_ENABLE;
+      else
+        op = EV_DELETE | EV_DISABLE;
+
+      EV_SET(events + n, handle->fd, EVFILT_WRITE, op, 0, 0, handle);
+
+      if (maxevents == (unsigned int) ++n) {
+        kevent(loop->kq, events, n, NULL, 0, NULL);
+        n = 0;
+      }
+    }
   }
 
-  ts.tv_nsec = (unsigned long) (timeout * 1e9) % 1000000000UL;
-  ts.tv_sec = (unsigned long) timeout;
+  if (n != 0)
+    kevent(loop->kq, events, n, NULL, 0, NULL);
 
-  tb = NULL;
-  if (mach_timebase_info((mach_timebase_info_t) &tb) != KERN_SUCCESS)
-    abort();
+  if (timeout < 0)
+    pts = NULL;
+  else if (timeout == 0) {
+    ts.tv_nsec = 0;
+    ts.tv_sec = 0;
+    pts = &ts;
+  }
+  else {
+    ts.tv_nsec = (unsigned long) (timeout * 1e9) % 1000000000UL;
+    ts.tv_sec = (unsigned long) timeout;
+    pts = &ts;
+  }
 
-  before = mach_absolute_time();
+  if (pts != NULL)
+    if (clock_gettime(CLOCK_MONOTONIC, &before))
+      abort();
 
   for (;;) {
-    n = kevent(loop->kq,
-               NULL,
-               0,
-               events,
-               maxevents,
-               (ts.tv_sec < 0 || ts.tv_nsec < 0) ? NULL : &ts);
+    n = kevent(loop->kq, NULL, 0, events, maxevents, pts);
 
-    if (n == 0) return;
+    if (n == 0)
+      return;
 
     if (n == -1) {
       if (errno == EINTR)
@@ -136,7 +167,6 @@ static void faio_poll(struct faio_loop *loop, double timeout)
     for (i = 0; i < n; i++) {
       handle = (struct faio_handle *) events[i].udata;
       revents = 0;
-      handle->revents = revents;
 
       if (events[i].filter == EVFILT_READ)
         revents |= FAIO_POLLIN;
@@ -147,38 +177,35 @@ static void faio_poll(struct faio_loop *loop, double timeout)
       if (events[i].flags & EV_EOF)
         revents |= FAIO_POLLHUP;
 
-      revents &= handle->events;
-      if (revents == 0)
-        continue;
-
       handle->cb(loop, handle, revents);
-      dispatched = 1;
     }
 
     /* We read as many events as we could but there might still be more.
      * Poll again but don't block this time.
      */
     if (maxevents == (unsigned int) n) {
-      ts.tv_sec = 0;
       ts.tv_nsec = 0;
+      ts.tv_sec = 0;
+      pts = &ts;
       continue;
     }
 
-    if (dispatched)
-      return;
+    return;
 
 update_timeout:
-    /* Update timeout after EINTR. */
-    after = mach_absolute_time();
+    if (pts == NULL)
+      continue;
 
-    diff = after - before;
-    diff *= tb->numer;
-    diff /= tb->denom;
+    if (ts.tv_sec == 0 && ts.tv_nsec == 0)
+      return;
 
-    ts.tv_sec -= diff / 1000000000UL;
-    ts.tv_nsec -= diff % 1000000000UL;
+    if (clock_gettime(CLOCK_MONOTONIC, &after))
+      abort();
 
-    if (ts.tv_sec < 0 || ts.tv_nsec < 0)
+    FAIO_TIMESPEC_SUB(&after, &before, &diff);
+    FAIO_TIMESPEC_SUB(&ts, &diff, &ts);
+
+    if (ts.tv_sec < 0)
       return;
 
     before = after;
@@ -194,27 +221,16 @@ static int faio_add(struct faio_loop *loop,
                     int fd,
                     unsigned int events)
 {
-  struct kevent evt[2];
-  struct timespec ts;
-  int evtn;
+  events &= POLLIN | POLLOUT;
+  events |= POLLERR | POLLHUP;
 
-  events &= FAIO_POLLIN | FAIO_POLLOUT | FAIO_POLLERR | FAIO_POLLHUP;
-
-  faio__queue_init(&handle->pending_queue);
+  faio__queue_append(&loop->pending_queue, &handle->pending_queue);
   handle->cb = cb;
   handle->fd = fd;
   handle->events = events;
   handle->revents = 0;
 
-  evtn = 0;
-  EV_SET(&evt[evtn++], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, handle);
-  EV_SET(&evt[evtn++], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, handle);
-
-  if (evtn == 0) return 0;
-
-  ts.tv_sec = 0;
-  ts.tv_nsec = 0;
-  return kevent(loop->kq, evt, evtn, NULL, 0, &ts);
+  return 0;
 }
 
 FAIO_ATTRIBUTE_UNUSED
@@ -222,14 +238,14 @@ static int faio_mod(struct faio_loop *loop,
                     struct faio_handle *handle,
                     unsigned int events)
 {
-  events &= FAIO_POLLIN | FAIO_POLLOUT | FAIO_POLLERR | FAIO_POLLHUP;
+  events &= POLLIN | POLLOUT;
+  events |= POLLERR | POLLHUP;
+  handle->revents = handle->events;
   handle->events = events;
 
-  if (0 == (events & handle->revents))
-    return 0;
-
-  if (faio__queue_empty(&handle->pending_queue))
-    faio__queue_append(&loop->pending_queue, &handle->pending_queue);
+  if (handle->events != handle->revents)
+    if (faio__queue_empty(&handle->pending_queue))
+      faio__queue_append(&loop->pending_queue, &handle->pending_queue);
 
   return 0;
 }
@@ -237,22 +253,20 @@ static int faio_mod(struct faio_loop *loop,
 FAIO_ATTRIBUTE_UNUSED
 static int faio_del(struct faio_loop *loop, struct faio_handle *handle)
 {
-  struct kevent evt[2];
-  struct timespec ts;
+  struct kevent events[2];
   int fd;
 
+  handle->revents = 0;
   handle->events = 0;
 
   if (!faio__queue_empty(&handle->pending_queue))
     faio__queue_remove(&handle->pending_queue);
 
   fd = handle->fd;
-  EV_SET(&evt[0], fd, EVFILT_READ, EV_DELETE | EV_DISABLE, 0, 0, handle);
-  EV_SET(&evt[1], fd, EVFILT_WRITE, EV_DELETE | EV_DISABLE, 0, 0, handle);
+  EV_SET(events + 0, fd, EVFILT_READ, EV_DELETE | EV_DISABLE, 0, 0, handle);
+  EV_SET(events + 1, fd, EVFILT_WRITE, EV_DELETE | EV_DISABLE, 0, 0, handle);
 
-  ts.tv_sec = 0;
-  ts.tv_nsec = 0;
-  return kevent(loop->kq, evt, 2, NULL, 0, &ts);
+  return kevent(loop->kq, events, 2, NULL, 0, NULL);
 }
 
 #endif /* FAIO_KQUEUE_H_ */
