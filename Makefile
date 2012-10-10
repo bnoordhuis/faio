@@ -17,6 +17,22 @@ ifeq ($(UNAME),Darwin)
 INCLUDE += faio-kqueue.h
 endif
 
+ifeq ($(UNAME),DragonFly)
+INCLUDE += faio-kqueue.h
+endif
+
+ifeq ($(UNAME),FreeBSD)
+INCLUDE += faio-kqueue.h
+endif
+
+ifeq ($(UNAME),NetBSD)
+INCLUDE += faio-kqueue.h
+endif
+
+ifeq ($(UNAME),OpenBSD)
+INCLUDE += faio-kqueue.h
+endif
+
 all:	bench.o
 	$(CC) $^ -o bench $(LDFLAGS)
 
