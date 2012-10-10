@@ -29,6 +29,10 @@
 #include <unistd.h>
 #include <poll.h>
 
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+#endif
+
 #define FAIO_POLLIN   POLLIN
 #define FAIO_POLLOUT  POLLOUT
 #define FAIO_POLLERR  POLLERR
@@ -48,6 +52,21 @@ struct faio_handle
   unsigned int events;
   int fd;
 };
+
+static int faio__gettime_monotonic(struct timespec *spec)
+{
+#if defined(__APPLE__)
+  uint64_t val;
+
+  val = mach_absolute_time();
+  spec->tv_sec = val / (uint64_t) 1e9;
+  spec->tv_nsec = val % (uint64_t) 1e9;
+
+  return 0;
+#else
+  return clock_gettime(CLOCK_MONOTONIC, spec);
+#endif
+}
 
 FAIO_ATTRIBUTE_UNUSED
 static int faio_init(struct faio_loop *loop)
@@ -148,7 +167,7 @@ static void faio_poll(struct faio_loop *loop, double timeout)
   }
 
   if (pts != NULL)
-    if (clock_gettime(CLOCK_MONOTONIC, &before))
+    if (faio__gettime_monotonic(&before))
       abort();
 
   for (;;) {
@@ -199,7 +218,7 @@ update_timeout:
     if (ts.tv_sec == 0 && ts.tv_nsec == 0)
       return;
 
-    if (clock_gettime(CLOCK_MONOTONIC, &after))
+    if (faio__gettime_monotonic(&after))
       abort();
 
     FAIO_TIMESPEC_SUB(&after, &before, &diff);
